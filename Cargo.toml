@@ -8,6 +8,10 @@ access-unit = { path = "../access-unit" }
 bytes = "1.6.0"
 #mse_fmp4 = { git = "https://github.com/wavey-ai/mse_fmp4.git" }
 mse_fmp4 = { path = "../../mse_fmp4" }
-
-
+soundkit = { git = "https://github.com/wavey-ai/soundkit.git" }
 tracing = "0.1.40"
+
+[dev-dependencies]
+soundkit-flac = { git = "https://github.com/wavey-ai/soundkit-flac.git" }
+hyper-hls = { path = "../hyper-hls" }
+tokio = { version = "1.40.0", features = ["full"] }
