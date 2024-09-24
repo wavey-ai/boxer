@@ -39,7 +39,7 @@ pub fn box_fmp4(
     avcc: Option<&AvcDecoderConfigurationRecord>,
     avcs: Vec<AccessUnit>,
     audio_units: Vec<AccessUnit>,
-    last_dts: u64,
+    next_dts: u64,
 ) -> Fmp4 {
     let mut segment = MediaSegment::new(seq);
     let mut fmp4_data: Vec<u8> = Vec::new();
@@ -97,7 +97,7 @@ pub fn box_fmp4(
             });
         }
 
-        avc_timestamps.push(last_dts);
+        avc_timestamps.push(next_dts);
         for i in 0..avc_samples.len() {
             let duration = avc_timestamps[i + 1] - avc_timestamps[i];
             total_ticks += duration;
@@ -115,25 +115,31 @@ pub fn box_fmp4(
         is_key = true
     }
 
-    let mut audio_track = TrackBox::new(1, false);
+    let audio_track_id = if avc_data.len() > 0 { 2 } else { 1 };
+
+    let mut audio_track = TrackBox::new(audio_track_id, false);
     let mut frame_info = None;
 
-    let mut audio_type = AudioType::Unkownn;
-
     let audio_type = if audio_units.len() > 0 {
-        detect_audio(&audio_units[0].data)
+        detect_audio(&audio_units[0].data);
+        AudioType::AAC
     } else {
         AudioType::Unkownn
     };
 
     match audio_type {
-        AudioType::Unkownn => {}
+        AudioType::Unkownn => {
+            if avc_data.len() > 0 {
+                segment.add_track_data(0, &avc_data);
+            }
+            segment.update_offsets();
+            segment.write_to(&mut fmp4_data).unwrap();
+        }
         AudioType::FLAC => {
             let info = decode_frame_header(&audio_units[0].data).unwrap();
             let frame_duration = info.block_size;
             frame_info = Some(info);
 
-            let mut prev_dts = last_dts;
             for a in &audio_units {
                 let raw_audio = &a.data;
                 audio_samples.push(Sample {
@@ -151,7 +157,7 @@ pub fn box_fmp4(
             traf.tfdt_box.base_media_decode_time = audio_units[0].pts as u32;
             segment.moof_box.traf_boxes.push(traf);
 
-            segment.add_track_data(0, &audio_data);
+            segment.add_track_data((audio_track_id - 1) as usize, &audio_data);
 
             audio_track.tkhd_box.duration = 0;
             audio_track.mdia_box.mdhd_box.timescale = 1000;
@@ -195,7 +201,7 @@ pub fn box_fmp4(
             }
 
             if !audio_units.is_empty() {
-                let mut traf = TrackFragmentBox::new(1);
+                let mut traf = TrackFragmentBox::new(audio_track_id as u32);
                 traf.tfhd_box.default_sample_duration = None;
                 traf.trun_box.data_offset = Some(0);
                 traf.trun_box.samples = audio_samples;
@@ -203,7 +209,7 @@ pub fn box_fmp4(
                     pts_to_ms_timescale(audio_units[0].pts) as u32;
                 segment.moof_box.traf_boxes.push(traf);
 
-                segment.add_track_data(1, &audio_data);
+                segment.add_track_data((audio_track_id - 1) as usize, &audio_data);
 
                 audio_track.tkhd_box.duration = 0;
                 audio_track.mdia_box.mdhd_box.timescale = 1000;
@@ -276,7 +282,7 @@ pub fn box_fmp4(
         match audio_type {
             AudioType::FLAC => {
                 if let Some(frame_info) = frame_info {
-                    let mut track = TrackBox::new(1, false);
+                    let mut track = TrackBox::new(audio_track_id, false);
                     let metadata = vec![FLACMetadataBlock {
                         data: create_streaminfo(&frame_info),
                     }];
@@ -303,7 +309,7 @@ pub fn box_fmp4(
                         .moov_box
                         .mvex_box
                         .trex_boxes
-                        .push(TrackExtendsBox::new(1));
+                        .push(TrackExtendsBox::new(audio_track_id));
                 }
             }
             AudioType::AAC => {
@@ -312,7 +318,7 @@ pub fn box_fmp4(
                     .moov_box
                     .mvex_box
                     .trex_boxes
-                    .push(TrackExtendsBox::new(1));
+                    .push(TrackExtendsBox::new(audio_track_id as u32));
             }
             _ => {}
         }
