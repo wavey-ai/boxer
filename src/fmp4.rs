@@ -33,10 +33,16 @@ pub fn ticks_to_ms(ticks: u64) -> u64 {
     (seconds * 1000.0) as u64
 }
 
-pub fn box_fmp4(
+pub struct Config<'a> {
+    width: u16,
+    height: u16,
+    avcc: Option<&'a AvcDecoderConfigurationRecord>,
+}
+
+pub fn box_fmp4<'a>(
     seq: u32,
     // if None stream is audio-only
-    avcc: Option<&AvcDecoderConfigurationRecord>,
+    config: Config,
     avcs: Vec<AccessUnit>,
     audio_units: Vec<AccessUnit>,
     next_dts: u64,
@@ -52,7 +58,7 @@ pub fn box_fmp4(
     let mut avc_samples = Vec::new();
     let mut audio_samples = Vec::new();
 
-    if avcc.is_some() {
+    if config.avcc.is_some() {
         let mut avc_timestamps = Vec::new();
 
         for a in avcs.iter() {
@@ -238,27 +244,25 @@ pub fn box_fmp4(
     }
     // create init.mp4
     let mut segment = InitializationSegment::default();
-    segment.moov_box.mvhd_box.timescale = 48000;
+    segment.moov_box.mvhd_box.timescale = 90000;
 
     segment.moov_box.mvhd_box.duration = 0;
     segment.moov_box.mvex_box.mehd_box = Some(MovieExtendsHeaderBox {
         fragment_duration: 0,
     });
 
-    if let Some(c) = avcc {
+    if let Some(c) = config.avcc {
         let mut track = TrackBox::new(1, true);
-        let width = 0;
-        let height = 0;
-        track.tkhd_box.width = (width as u32) << 16;
-        track.tkhd_box.height = (height as u32) << 16;
+        track.tkhd_box.width = (config.width as u32) << 16;
+        track.tkhd_box.height = (config.height as u32) << 16;
         track.tkhd_box.duration = 0;
         //track.edts_box.elst_box.media_time = start_time;
         track.mdia_box.mdhd_box.timescale = 90000;
         track.mdia_box.mdhd_box.duration = 0;
 
         let avc_sample_entry = AvcSampleEntry {
-            width,
-            height,
+            width: config.width,
+            height: config.height,
             avcc_box: AvcConfigurationBox {
                 configuration: c.clone(),
             },
