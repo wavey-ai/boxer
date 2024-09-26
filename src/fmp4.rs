@@ -33,6 +33,7 @@ pub fn ticks_to_ms(ticks: u64) -> u64 {
     (seconds * 1000.0) as u64
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub width: u16,
     pub height: u16,
