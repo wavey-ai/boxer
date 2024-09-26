@@ -34,9 +34,9 @@ pub fn ticks_to_ms(ticks: u64) -> u64 {
 }
 
 pub struct Config<'a> {
-    width: u16,
-    height: u16,
-    avcc: Option<&'a AvcDecoderConfigurationRecord>,
+    pub width: u16,
+    pub height: u16,
+    pub avcc: Option<&'a AvcDecoderConfigurationRecord>,
 }
 
 pub fn box_fmp4<'a>(
