@@ -33,14 +33,13 @@ pub fn ticks_to_ms(ticks: u64) -> u64 {
     (seconds * 1000.0) as u64
 }
 
-#[derive(Copy, Clone)]
-pub struct Config<'a> {
+pub struct Config {
     pub width: u16,
     pub height: u16,
-    pub avcc: Option<&'a AvcDecoderConfigurationRecord>,
+    pub avcc: Option<AvcDecoderConfigurationRecord>,
 }
 
-pub fn box_fmp4<'a>(
+pub fn box_fmp4(
     seq: u32,
     // if None stream is audio-only
     config: Config,
