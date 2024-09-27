@@ -128,8 +128,7 @@ pub fn box_fmp4(
     let mut frame_info = None;
 
     let audio_type = if audio_units.len() > 0 {
-        detect_audio(&audio_units[0].data);
-        AudioType::AAC
+        detect_audio(&audio_units[0].data)
     } else {
         AudioType::Unkownn
     };
