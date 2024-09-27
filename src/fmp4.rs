@@ -166,7 +166,7 @@ pub fn box_fmp4(
             segment.add_track_data((audio_track_id - 1) as usize, &audio_data);
 
             audio_track.tkhd_box.duration = 0;
-            audio_track.mdia_box.mdhd_box.timescale = 1000;
+            audio_track.mdia_box.mdhd_box.timescale = 90000;
             audio_track.mdia_box.mdhd_box.duration = 0;
 
             segment.update_offsets();
@@ -185,9 +185,8 @@ pub fn box_fmp4(
                     sampling_frequency = header.sampling_frequency;
                     channel_configuration = header.channel_configuration;
                     profile = header.profile;
-                    let frame_duration = ((1024 as f32 / sampling_frequency.as_u32() as f32)
-                        * 1000.0)
-                        .round() as u32;
+                    let frame_duration: u32 =
+                        ((1024.0 * 90_000.0) / sampling_frequency.as_u32() as f32).round() as u32;
 
                     audio_samples.push(Sample {
                         duration: Some(frame_duration),
@@ -211,14 +210,13 @@ pub fn box_fmp4(
                 traf.tfhd_box.default_sample_duration = None;
                 traf.trun_box.data_offset = Some(0);
                 traf.trun_box.samples = audio_samples;
-                traf.tfdt_box.base_media_decode_time =
-                    pts_to_ms_timescale(audio_units[0].pts) as u32;
+                traf.tfdt_box.base_media_decode_time = audio_units[0].pts as u32;
                 segment.moof_box.traf_boxes.push(traf);
 
                 segment.add_track_data((audio_track_id - 1) as usize, &audio_data);
 
                 audio_track.tkhd_box.duration = 0;
-                audio_track.mdia_box.mdhd_box.timescale = 1000;
+                audio_track.mdia_box.mdhd_box.timescale = 90000;
                 audio_track.mdia_box.mdhd_box.duration = 0;
 
                 let aac_sample_entry = AacSampleEntry {
