@@ -130,11 +130,11 @@ pub fn box_fmp4(
     let audio_type = if audio_units.len() > 0 {
         detect_audio(&audio_units[0].data)
     } else {
-        AudioType::Unkownn
+        AudioType::Unknown
     };
 
     match audio_type {
-        AudioType::Unkownn => {
+        AudioType::Unknown => {
             if avc_data.len() > 0 {
                 segment.add_track_data(0, &avc_data);
             }
