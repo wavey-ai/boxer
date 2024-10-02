@@ -59,9 +59,9 @@ pub fn box_fmp4(
     let mut avc_samples = Vec::new();
     let mut audio_samples = Vec::new();
 
-    if config.avcc.is_some() {
-        let mut avc_timestamps = Vec::new();
+    let mut avc_timestamps = Vec::new();
 
+    if config.avcc.is_some() {
         for a in avcs.iter() {
             if a.key {
                 is_key = true;
@@ -127,50 +127,70 @@ pub fn box_fmp4(
     let mut audio_track = TrackBox::new(audio_track_id, false);
     let mut frame_info = None;
 
-    let audio_type = if audio_units.len() > 0 {
+    let mut audio_type = if audio_units.len() > 0 {
         detect_audio(&audio_units[0].data)
     } else {
-        AudioType::Unkownn
+        AudioType::Unknown
     };
 
+    let mut offset = 0;
+
+    if audio_units.len() > 0 && audio_type == AudioType::Unknown {
+        audio_type = detect_audio(&audio_units[0].data[12..]);
+        if audio_type != AudioType::Unknown {
+            offset = 12
+        } else {
+            audio_type = detect_audio(&audio_units[0].data[4..]);
+            if audio_type != AudioType::Unknown {
+                offset = 4
+            }
+        }
+    }
+
+    let mut audio_ms: u32 = 0;
+
     match audio_type {
-        AudioType::Unkownn => {
+        AudioType::Unknown => {
             if avc_data.len() > 0 {
                 segment.add_track_data(0, &avc_data);
+
+                segment.update_offsets();
+                segment.write_to(&mut fmp4_data).unwrap();
             }
-            segment.update_offsets();
-            segment.write_to(&mut fmp4_data).unwrap();
         }
         AudioType::FLAC => {
-            let info = decode_frame_header(&audio_units[0].data).unwrap();
-            let frame_duration = info.block_size;
-            frame_info = Some(info);
-
+            let info = decode_frame_header(&audio_units[0].data[offset..]).unwrap();
             for a in &audio_units {
-                let raw_audio = &a.data;
+                let raw_audio = &a.data[offset..];
+                let frame_duration_seconds = info.block_size as f64 / info.sample_rate as f64;
+                let frame_duration_ms = (frame_duration_seconds * 1000.0).round() as u32;
+                audio_ms += frame_duration_ms;
                 audio_samples.push(Sample {
-                    duration: Some(frame_duration as u32),
+                    duration: Some(frame_duration_ms),
                     size: Some(raw_audio.len() as u32),
                     flags: None,
                     composition_time_offset: None,
                 });
                 audio_data.extend_from_slice(raw_audio);
             }
+
             let mut traf = TrackFragmentBox::new(1);
             traf.tfhd_box.default_sample_duration = None;
             traf.trun_box.data_offset = Some(0);
             traf.trun_box.samples = audio_samples;
-            traf.tfdt_box.base_media_decode_time = audio_units[0].pts as u32;
+            traf.tfdt_box.base_media_decode_time = ticks_to_ms(audio_units[0].pts) as u32;
             segment.moof_box.traf_boxes.push(traf);
 
             segment.add_track_data((audio_track_id - 1) as usize, &audio_data);
 
             audio_track.tkhd_box.duration = 0;
-            audio_track.mdia_box.mdhd_box.timescale = 90000;
+            audio_track.mdia_box.mdhd_box.timescale = 1000;
             audio_track.mdia_box.mdhd_box.duration = 0;
 
             segment.update_offsets();
             segment.write_to(&mut fmp4_data).unwrap();
+
+            frame_info = Some(info);
         }
         AudioType::AAC => {
             let mut sampling_frequency =
@@ -185,9 +205,8 @@ pub fn box_fmp4(
                     sampling_frequency = header.sampling_frequency;
                     channel_configuration = header.channel_configuration;
                     profile = header.profile;
-                    let frame_duration: u32 =
+                    let frame_duration =
                         ((1024.0 * 90_000.0) / sampling_frequency.as_u32() as f32).round() as u32;
-
                     audio_samples.push(Sample {
                         duration: Some(frame_duration),
                         size: Some(u32::from(sample_size)),
@@ -216,7 +235,7 @@ pub fn box_fmp4(
                 segment.add_track_data((audio_track_id - 1) as usize, &audio_data);
 
                 audio_track.tkhd_box.duration = 0;
-                audio_track.mdia_box.mdhd_box.timescale = 90000;
+                audio_track.mdia_box.mdhd_box.timescale = 90_000;
                 audio_track.mdia_box.mdhd_box.duration = 0;
 
                 let aac_sample_entry = AacSampleEntry {
@@ -240,9 +259,10 @@ pub fn box_fmp4(
         }
         _ => {}
     }
+
     // create init.mp4
     let mut segment = InitializationSegment::default();
-    segment.moov_box.mvhd_box.timescale = 90000;
+    segment.moov_box.mvhd_box.timescale = if avcs.len() > 0 { 90000 } else { 1000 };
 
     segment.moov_box.mvhd_box.duration = 0;
     segment.moov_box.mvex_box.mehd_box = Some(MovieExtendsHeaderBox {
@@ -280,50 +300,48 @@ pub fn box_fmp4(
             .push(TrackExtendsBox::new(1));
     }
 
-    if audio_units.len() > 0 {
-        match audio_type {
-            AudioType::FLAC => {
-                if let Some(frame_info) = frame_info {
-                    let mut track = TrackBox::new(audio_track_id, false);
-                    let metadata = vec![FLACMetadataBlock {
-                        data: create_streaminfo(&frame_info),
-                    }];
+    match audio_type {
+        AudioType::FLAC => {
+            if let Some(frame_info) = frame_info {
+                let mut track = TrackBox::new(audio_track_id, false);
+                let metadata = vec![FLACMetadataBlock {
+                    data: create_streaminfo(&frame_info),
+                }];
 
-                    let flac_sample_entry = FLACSampleEntry {
-                        dfla_box: mse_fmp4::flac::FLACSpecificBox {
-                            metadata_blocks: metadata,
-                        },
-                        channel_count: frame_info.channels.into(),
-                        sample_rate: frame_info.sample_rate.into(),
-                        sample_size: (frame_info.bps as u16 * 1000).into(),
-                    };
-                    track
-                        .mdia_box
-                        .minf_box
-                        .stbl_box
-                        .stsd_box
-                        .sample_entries
-                        .push(SampleEntry::Flac(flac_sample_entry));
+                let flac_sample_entry = FLACSampleEntry {
+                    dfla_box: mse_fmp4::flac::FLACSpecificBox {
+                        metadata_blocks: metadata,
+                    },
+                    channel_count: frame_info.channels.into(),
+                    sample_rate: frame_info.sample_rate.into(),
+                    sample_size: (frame_info.bps as u16 * 1000).into(),
+                };
+                track
+                    .mdia_box
+                    .minf_box
+                    .stbl_box
+                    .stsd_box
+                    .sample_entries
+                    .push(SampleEntry::Flac(flac_sample_entry));
 
-                    segment.moov_box.trak_boxes.push(track);
+                segment.moov_box.trak_boxes.push(track);
 
-                    segment
-                        .moov_box
-                        .mvex_box
-                        .trex_boxes
-                        .push(TrackExtendsBox::new(audio_track_id));
-                }
-            }
-            AudioType::AAC => {
-                segment.moov_box.trak_boxes.push(audio_track);
                 segment
                     .moov_box
                     .mvex_box
                     .trex_boxes
-                    .push(TrackExtendsBox::new(audio_track_id as u32));
+                    .push(TrackExtendsBox::new(audio_track_id));
             }
-            _ => {}
         }
+        AudioType::AAC => {
+            segment.moov_box.trak_boxes.push(audio_track);
+            segment
+                .moov_box
+                .mvex_box
+                .trex_boxes
+                .push(TrackExtendsBox::new(audio_track_id as u32));
+        }
+        _ => {}
     }
 
     let _ = segment.write_to(&mut init_data);
@@ -335,7 +353,11 @@ pub fn box_fmp4(
 
     Fmp4 {
         init,
-        duration: ticks_to_ms(total_ticks) as u32,
+        duration: if avcs.len() == 0 {
+            audio_ms
+        } else {
+            ticks_to_ms(total_ticks) as u32
+        },
         key: is_key,
         data: Bytes::from(fmp4_data),
     }
