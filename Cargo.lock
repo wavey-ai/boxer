@@ -5,7 +5,7 @@ version = 3
 [[package]]
 name = "access-unit"
 version = "0.0.4"
-source = "git+https://github.com/wavey-ai/access-unit.git#f26a7e002c563d2d8eb1f1d2a53ea5a03e325b11"
+source = "git+https://github.com/wavey-ai/access-unit.git#3e2274452a27e35cbb2eb8a83d8e321ed6a0e90d"
 dependencies = [
  "bytes",
 ]
@@ -89,24 +89,15 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.20.1"
+version = "1.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82881c4be219ab5faaf2ad5e5e5ecdff8c66bd7402ca3160975c93b24961afd1"
-dependencies = [
- "portable-atomic",
-]
+checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
 
 [[package]]
 name = "pin-project-lite"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bda66fc9667c18cb2758a2ac84d1167245054bcf85d5d1aaa6923f45801bdd02"
-
-[[package]]
-name = "portable-atomic"
-version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc9c68a3f6da06753e9335d63e27f6b9754dd1920d941135b7ea8224f141adb2"
 
 [[package]]
 name = "primal-check"
@@ -174,7 +165,7 @@ dependencies = [
 [[package]]
 name = "soundkit"
 version = "0.11.8"
-source = "git+https://github.com/wavey-ai/soundkit.git#869686c9665d47562357ba02d764c183741a73ef"
+source = "git+https://github.com/wavey-ai/soundkit.git#f15865f7b272a93d775731f6a346939a2e40ceb8"
 dependencies = [
  "byteorder",
  "bytes",
