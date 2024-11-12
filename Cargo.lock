@@ -4,8 +4,8 @@ version = 3
 
 [[package]]
 name = "access-unit"
-version = "0.0.4"
-source = "git+https://github.com/wavey-ai/access-unit.git#3e2274452a27e35cbb2eb8a83d8e321ed6a0e90d"
+version = "0.0.5"
+source = "git+ssh://git@github.com/wavey-ai/access-unit.git#9141345bb4e8be2947cbf2b30800a6626ce800e2"
 dependencies = [
  "bytes",
 ]
@@ -35,9 +35,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.7.2"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "428d9aa8fbc0670b7b8d6030a7fadd0f86151cae55e4dbbece15f3780a3dfaf3"
+checksum = "9ac0150caa2ae65ca5bd83f25c7de183dea78d4d366469f148435e2acfbad0da"
 
 [[package]]
 name = "mpeg2ts"
@@ -52,7 +52,7 @@ dependencies = [
 [[package]]
 name = "mse_fmp4"
 version = "0.2.0"
-source = "git+https://github.com/wavey-ai/mse_fmp4.git#238ff37d6b83380b370905342d015375bda66608"
+source = "git+ssh://git@github.com/wavey-ai/mse_fmp4.git#238ff37d6b83380b370905342d015375bda66608"
 dependencies = [
  "byteorder",
  "bytes",
@@ -95,9 +95,9 @@ checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
 
 [[package]]
 name = "pin-project-lite"
-version = "0.2.14"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bda66fc9667c18cb2758a2ac84d1167245054bcf85d5d1aaa6923f45801bdd02"
+checksum = "915a1e146535de9163f3987b8944ed8cf49a18bb0056bcebcdcece385cece4ff"
 
 [[package]]
 name = "primal-check"
@@ -110,9 +110,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.86"
+version = "1.0.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e719e8df665df0d1c8fbfd238015744736151d4445ec0836b8e628aae103b77"
+checksum = "f139b0662de085916d1fb67d2b4169d1addddda1919e696f3252b740b629986e"
 dependencies = [
  "unicode-ident",
 ]
@@ -165,7 +165,7 @@ dependencies = [
 [[package]]
 name = "soundkit"
 version = "0.11.8"
-source = "git+https://github.com/wavey-ai/soundkit.git#f15865f7b272a93d775731f6a346939a2e40ceb8"
+source = "git+ssh://git@github.com/wavey-ai/soundkit.git#d5e380f50e4e81793fa0e1d6d039c457a6847ea1"
 dependencies = [
  "byteorder",
  "bytes",
@@ -191,9 +191,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.79"
+version = "2.0.87"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89132cd0bf050864e1d38dc3bbc07a0eb8e7530af26344d3d2bbbef83499f590"
+checksum = "25aa4ce346d03a6dcd68dd8b4010bcb74e54e62c90c573f394c46eae99aba32d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -219,7 +219,7 @@ checksum = "34704c8d6ebcbc939824180af020566b01a7c01f80641264eba0999f6c2b6be7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.79",
+ "syn 2.0.87",
 ]
 
 [[package]]
