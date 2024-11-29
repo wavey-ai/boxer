@@ -205,9 +205,10 @@ pub fn box_fmp4(
                     sampling_frequency = header.sampling_frequency;
                     channel_configuration = header.channel_configuration;
                     profile = header.profile;
-                    let frame_duration =
-                        (1024.0 / sampling_frequency.as_u32() as f32).round() as u32;
+                    let frame_duration: u32 =
+                        (1024.0 / sampling_frequency.as_u32() as f32 * 1000.0).round() as u32;
                     audio_ms += frame_duration;
+                    dbg!("audio", audio_ms);
                     audio_samples.push(Sample {
                         duration: Some(frame_duration),
                         size: Some(u32::from(sample_size)),
