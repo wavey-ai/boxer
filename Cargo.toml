@@ -6,6 +6,3 @@ edition = "2021"
 [dependencies]
 access-unit = "0.1.1"
 bytes = "1.6.0"
-mse_fmp4 = { git = "ssh://git@github.com/wavey-ai/mse_fmp4.git" }
-soundkit = { git = "ssh://git@github.com/wavey-ai/soundkit.git" }
-tracing = "0.1.40"
