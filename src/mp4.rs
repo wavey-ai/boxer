@@ -246,6 +246,14 @@ pub enum AudioInit {
         sample_rate: u32,
         streaminfo: Vec<u8>,
     },
+    Pcm {
+        track_id: u32,
+        channel_count: u16,
+        sample_size: u8,
+        sample_rate: u32,
+        little_endian: bool,
+        floating_point: bool,
+    },
 }
 
 pub fn write_media_segment(
@@ -342,7 +350,9 @@ fn write_init_segment_inner(
 impl AudioInit {
     fn track_id(&self) -> u32 {
         match self {
-            AudioInit::Aac { track_id, .. } | AudioInit::Flac { track_id, .. } => *track_id,
+            AudioInit::Aac { track_id, .. }
+            | AudioInit::Flac { track_id, .. }
+            | AudioInit::Pcm { track_id, .. } => *track_id,
         }
     }
 }
@@ -638,6 +648,21 @@ fn write_stsd(
                     streaminfo,
                     ..
                 } => write_flac(out, *channel_count, *sample_size, *sample_rate, streaminfo)?,
+                AudioInit::Pcm {
+                    channel_count,
+                    sample_size,
+                    sample_rate,
+                    little_endian,
+                    floating_point,
+                    ..
+                } => write_pcm(
+                    out,
+                    *channel_count,
+                    *sample_size,
+                    *sample_rate,
+                    *little_endian,
+                    *floating_point,
+                )?,
             }
         } else {
             return None;
@@ -767,6 +792,51 @@ fn write_dfla(out: &mut Vec<u8>, streaminfo: &[u8]) -> Option<()> {
         }
         write_u32(out, (1 << 31) | block_len);
         out.extend_from_slice(streaminfo);
+        Some(())
+    })
+}
+
+fn write_pcm(
+    out: &mut Vec<u8>,
+    channel_count: u16,
+    sample_size: u8,
+    sample_rate: u32,
+    little_endian: bool,
+    floating_point: bool,
+) -> Option<()> {
+    let sample_entry = if floating_point { *b"fpcm" } else { *b"ipcm" };
+    write_box(out, sample_entry, |out| {
+        write_zeroes(out, 6);
+        write_u16(out, 1);
+        write_zeroes(out, 8);
+        write_u16(out, channel_count);
+        write_u16(out, u16::from(sample_size));
+        write_zeroes(out, 4);
+        write_u32(out, sample_rate.checked_shl(16)?);
+        write_pcmc(out, sample_size, little_endian)?;
+        write_chnl_unknown_positions(out, channel_count)?;
+        Some(())
+    })
+}
+
+fn write_pcmc(out: &mut Vec<u8>, sample_size: u8, little_endian: bool) -> Option<()> {
+    write_full_box(out, *b"pcmC", 0, 0, |out| {
+        write_u8(out, u8::from(little_endian));
+        write_u8(out, sample_size);
+        Some(())
+    })
+}
+
+fn write_chnl_unknown_positions(out: &mut Vec<u8>, channel_count: u16) -> Option<()> {
+    write_full_box(out, *b"chnl", 0, 0, |out| {
+        // Channel-structured, custom layout. DAW stems do not necessarily map
+        // to loudspeakers, so preserve exact source order and mark each
+        // position as the standardized unknown/undefined value.
+        write_u8(out, 1);
+        write_u8(out, 0);
+        for _ in 0..channel_count {
+            write_u8(out, 127);
+        }
         Some(())
     })
 }

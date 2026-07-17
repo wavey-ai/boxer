@@ -62,6 +62,34 @@ pub struct Config {
     pub avcc: Option<AvcDecoderConfigurationRecord>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PcmSampleKind {
+    Integer,
+    Float,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PcmAudioConfig {
+    pub sample_rate: u32,
+    pub channel_count: u16,
+    pub sample_size: u8,
+    pub little_endian: bool,
+    pub sample_kind: PcmSampleKind,
+}
+
+impl PcmAudioConfig {
+    fn bytes_per_frame(self) -> Option<usize> {
+        let valid_size = match self.sample_kind {
+            PcmSampleKind::Integer => matches!(self.sample_size, 16 | 24 | 32),
+            PcmSampleKind::Float => matches!(self.sample_size, 32 | 64),
+        };
+        if !valid_size || self.sample_rate == 0 || self.channel_count == 0 {
+            return None;
+        }
+        usize::from(self.sample_size / 8).checked_mul(usize::from(self.channel_count))
+    }
+}
+
 pub fn box_fmp4(
     seq: u32,
     // if None stream is audio-only
@@ -81,6 +109,18 @@ pub fn box_fmp4_with_init(
     audio_units: Vec<AccessUnit>,
     next_dts: u64,
     include_init: bool,
+) -> Fmp4 {
+    box_fmp4_with_init_and_pcm(seq, config, avcs, audio_units, next_dts, include_init, None)
+}
+
+pub fn box_fmp4_with_init_and_pcm(
+    seq: u32,
+    config: Config,
+    avcs: Vec<AccessUnit>,
+    audio_units: Vec<AccessUnit>,
+    next_dts: u64,
+    include_init: bool,
+    pcm_config: Option<PcmAudioConfig>,
 ) -> Fmp4 {
     let mut fmp4_data: Vec<u8> = Vec::new();
     let mut init_data: Vec<u8> = Vec::new();
@@ -159,86 +199,135 @@ pub fn box_fmp4_with_init(
     let mut audio_base_media_decode_time = None;
     let mut audio_init = None;
 
-    let (audio_type, offset) = detect_audio_with_offset(&audio_units);
+    let (audio_type, offset) = if pcm_config.is_some() {
+        (AudioType::Unknown, 0)
+    } else {
+        detect_audio_with_offset(&audio_units)
+    };
 
     let mut audio_ms: u32 = 0;
 
-    match audio_type {
-        AudioType::Unknown => {}
-        AudioType::FLAC => {
-            for a in &audio_units {
-                let Some(raw_audio) = a.data.get(offset..) else {
-                    continue;
-                };
-                if raw_audio.is_empty() {
+    if let Some(pcm) = pcm_config {
+        if let Some(bytes_per_frame) = pcm.bytes_per_frame() {
+            for access_unit in &audio_units {
+                if access_unit.data.is_empty()
+                    || !access_unit.data.len().is_multiple_of(bytes_per_frame)
+                {
                     continue;
                 }
-                let Ok(info) = decode_frame_header(raw_audio) else {
-                    continue;
-                };
-                if info.sample_rate == 0 {
+                let frame_count = access_unit.data.len() / bytes_per_frame;
+                let duration_ms = u64::try_from(frame_count)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(1_000)
+                    .saturating_add(u64::from(pcm.sample_rate) / 2)
+                    / u64::from(pcm.sample_rate);
+                if duration_ms == 0 {
                     continue;
                 }
-                let frame_duration_seconds = info.block_size as f64 / info.sample_rate as f64;
-                let frame_duration_ms = (frame_duration_seconds * 1000.0).round() as u32;
-                audio_ms += frame_duration_ms;
+                let Ok(sample_size) = u32::try_from(access_unit.data.len()) else {
+                    continue;
+                };
+                let duration_ms = u64_to_u32_saturating(duration_ms);
+                audio_ms = audio_ms.saturating_add(duration_ms);
                 audio_samples.push(FragmentSample {
-                    duration: Some(frame_duration_ms),
-                    size: Some(raw_audio.len() as u32),
+                    duration: Some(duration_ms),
+                    size: Some(sample_size),
                     flags: None,
                     composition_time_offset: None,
                 });
-                audio_data.extend_from_slice(raw_audio);
-                audio_base_media_decode_time.get_or_insert(a.pts);
-
-                if frame_info.is_none() {
-                    frame_info = Some(info);
-                }
+                audio_data.extend_from_slice(&access_unit.data);
+                audio_base_media_decode_time.get_or_insert(access_unit.pts);
             }
-
             if !audio_samples.is_empty() {
-                has_audio_track = true;
-            }
-        }
-        AudioType::AAC => {
-            let mut sampling_frequency = SamplingFrequency::Hz48000;
-            let mut channel_configuration = ChannelConfiguration::TwoChannels;
-            let mut profile = AacProfile::Main;
-
-            for a in audio_units.iter() {
-                if let Some(header) = AdtsHeader::read_from(&a.data) {
-                    let Some(frame) = extract_aac_data(&a.data) else {
-                        continue;
-                    };
-                    let sample_size = frame.len() as u32;
-                    sampling_frequency = header.sampling_frequency;
-                    channel_configuration = header.channel_configuration;
-                    profile = header.profile;
-                    let frame_duration: u32 =
-                        (1024.0 / sampling_frequency.as_u32() as f32 * 1000.0).round() as u32;
-                    audio_ms += frame_duration;
-                    audio_samples.push(FragmentSample {
-                        duration: Some(frame_duration),
-                        size: Some(sample_size),
-                        flags: None,
-                        composition_time_offset: None,
-                    });
-                    audio_data.extend_from_slice(&frame);
-                    audio_base_media_decode_time.get_or_insert(a.pts);
-                }
-            }
-
-            if !audio_samples.is_empty() {
-                audio_init = Some(AudioInit::Aac {
+                audio_init = Some(AudioInit::Pcm {
                     track_id: audio_track_id,
-                    profile,
-                    frequency: sampling_frequency,
-                    channel_configuration,
+                    channel_count: pcm.channel_count,
+                    sample_size: pcm.sample_size,
+                    sample_rate: pcm.sample_rate,
+                    little_endian: pcm.little_endian,
+                    floating_point: matches!(pcm.sample_kind, PcmSampleKind::Float),
                 });
                 has_audio_track = true;
             }
         }
-        _ => {}
+    } else {
+        match audio_type {
+            AudioType::Unknown => {}
+            AudioType::FLAC => {
+                for a in &audio_units {
+                    let Some(raw_audio) = a.data.get(offset..) else {
+                        continue;
+                    };
+                    if raw_audio.is_empty() {
+                        continue;
+                    }
+                    let Ok(info) = decode_frame_header(raw_audio) else {
+                        continue;
+                    };
+                    if info.sample_rate == 0 {
+                        continue;
+                    }
+                    let frame_duration_seconds = info.block_size as f64 / info.sample_rate as f64;
+                    let frame_duration_ms = (frame_duration_seconds * 1000.0).round() as u32;
+                    audio_ms += frame_duration_ms;
+                    audio_samples.push(FragmentSample {
+                        duration: Some(frame_duration_ms),
+                        size: Some(raw_audio.len() as u32),
+                        flags: None,
+                        composition_time_offset: None,
+                    });
+                    audio_data.extend_from_slice(raw_audio);
+                    audio_base_media_decode_time.get_or_insert(a.pts);
+
+                    if frame_info.is_none() {
+                        frame_info = Some(info);
+                    }
+                }
+
+                if !audio_samples.is_empty() {
+                    has_audio_track = true;
+                }
+            }
+            AudioType::AAC => {
+                let mut sampling_frequency = SamplingFrequency::Hz48000;
+                let mut channel_configuration = ChannelConfiguration::TwoChannels;
+                let mut profile = AacProfile::Main;
+
+                for a in audio_units.iter() {
+                    if let Some(header) = AdtsHeader::read_from(&a.data) {
+                        let Some(frame) = extract_aac_data(&a.data) else {
+                            continue;
+                        };
+                        let sample_size = frame.len() as u32;
+                        sampling_frequency = header.sampling_frequency;
+                        channel_configuration = header.channel_configuration;
+                        profile = header.profile;
+                        let frame_duration: u32 =
+                            (1024.0 / sampling_frequency.as_u32() as f32 * 1000.0).round() as u32;
+                        audio_ms += frame_duration;
+                        audio_samples.push(FragmentSample {
+                            duration: Some(frame_duration),
+                            size: Some(sample_size),
+                            flags: None,
+                            composition_time_offset: None,
+                        });
+                        audio_data.extend_from_slice(&frame);
+                        audio_base_media_decode_time.get_or_insert(a.pts);
+                    }
+                }
+
+                if !audio_samples.is_empty() {
+                    audio_init = Some(AudioInit::Aac {
+                        track_id: audio_track_id,
+                        profile,
+                        frequency: sampling_frequency,
+                        channel_configuration,
+                    });
+                    has_audio_track = true;
+                }
+            }
+            _ => {}
+        }
     }
 
     if matches!(audio_type, AudioType::FLAC) {
@@ -502,5 +591,91 @@ mod tests {
         );
 
         assert!(fmp4.data.is_empty());
+    }
+
+    #[test]
+    fn integer_pcm_fmp4_preserves_exact_s24le_samples_and_signals_format() {
+        let pcm: Vec<u8> = (0..240 * 2 * 3)
+            .map(|index| ((index * 37 + 11) & 0xff) as u8)
+            .collect();
+        let fmp4 = box_fmp4_with_init_and_pcm(
+            7,
+            Config {
+                width: 0,
+                height: 0,
+                avcc: None,
+            },
+            Vec::new(),
+            vec![AccessUnit {
+                key: true,
+                pts: 0,
+                dts: 0,
+                data: Bytes::copy_from_slice(&pcm),
+                stream_type: 0,
+                id: 3,
+            }],
+            0,
+            true,
+            Some(PcmAudioConfig {
+                sample_rate: 48_000,
+                channel_count: 2,
+                sample_size: 24,
+                little_endian: true,
+                sample_kind: PcmSampleKind::Integer,
+            }),
+        );
+        let init = fmp4.init.as_ref().expect("PCM init segment");
+        let mdat = box_type_offsets(&fmp4.data, b"mdat")
+            .into_iter()
+            .next()
+            .expect("mdat box");
+        let pcmc = box_type_offsets(init, b"pcmC")
+            .into_iter()
+            .next()
+            .expect("pcmC box");
+        let chnl = box_type_offsets(init, b"chnl")
+            .into_iter()
+            .next()
+            .expect("chnl box");
+
+        assert_eq!(fmp4.duration, 5);
+        assert_eq!(&fmp4.data[mdat + 4..], pcm);
+        assert!(!box_type_offsets(init, b"ipcm").is_empty());
+        assert_eq!(&init[pcmc + 8..pcmc + 10], &[1, 24]);
+        assert_eq!(&init[chnl + 8..chnl + 12], &[1, 0, 127, 127]);
+    }
+
+    #[test]
+    fn floating_point_pcm_uses_fpcm_sample_entry() {
+        let fmp4 = box_fmp4_with_init_and_pcm(
+            8,
+            Config {
+                width: 0,
+                height: 0,
+                avcc: None,
+            },
+            Vec::new(),
+            vec![AccessUnit {
+                key: true,
+                pts: 0,
+                dts: 0,
+                data: Bytes::from(vec![0; 240 * 4]),
+                stream_type: 0,
+                id: 4,
+            }],
+            0,
+            true,
+            Some(PcmAudioConfig {
+                sample_rate: 48_000,
+                channel_count: 1,
+                sample_size: 32,
+                little_endian: true,
+                sample_kind: PcmSampleKind::Float,
+            }),
+        );
+        let init = fmp4.init.as_ref().expect("PCM init segment");
+
+        assert!(!box_type_offsets(init, b"fpcm").is_empty());
+        assert!(box_type_offsets(init, b"ipcm").is_empty());
     }
 }
