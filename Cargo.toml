@@ -1,9 +1,9 @@
 [package]
 name = "boxer"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 
 [dependencies]
-access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
+access-unit = { version = "0.1.2", git = "https://github.com/wavey-ai/access-unit.git" }
 bytes = "1.6.0"
 libopus-rs = "0.0.2"
