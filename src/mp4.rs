@@ -254,6 +254,13 @@ pub enum AudioInit {
         little_endian: bool,
         floating_point: bool,
     },
+    Opus {
+        track_id: u32,
+        input_sample_rate: u32,
+        channel_count: u16,
+        pre_skip: u16,
+        output_gain: i16,
+    },
 }
 
 pub fn write_media_segment(
@@ -336,7 +343,15 @@ fn write_init_segment_inner(
             write_trak(out, video.track_id, true, 90_000, 0, Some(video), None)?;
         }
         if let Some(audio) = audio {
-            write_trak(out, audio.track_id(), false, 1_000, 0, None, Some(audio))?;
+            write_trak(
+                out,
+                audio.track_id(),
+                false,
+                audio.timescale(),
+                0,
+                None,
+                Some(audio),
+            )?;
         }
         write_mvex(
             out,
@@ -352,7 +367,15 @@ impl AudioInit {
         match self {
             AudioInit::Aac { track_id, .. }
             | AudioInit::Flac { track_id, .. }
-            | AudioInit::Pcm { track_id, .. } => *track_id,
+            | AudioInit::Pcm { track_id, .. }
+            | AudioInit::Opus { track_id, .. } => *track_id,
+        }
+    }
+
+    pub(crate) fn timescale(&self) -> u32 {
+        match self {
+            AudioInit::Opus { .. } => 48_000,
+            AudioInit::Aac { .. } | AudioInit::Flac { .. } | AudioInit::Pcm { .. } => 1_000,
         }
     }
 }
@@ -663,6 +686,19 @@ fn write_stsd(
                     *little_endian,
                     *floating_point,
                 )?,
+                AudioInit::Opus {
+                    input_sample_rate,
+                    channel_count,
+                    pre_skip,
+                    output_gain,
+                    ..
+                } => write_opus(
+                    out,
+                    *input_sample_rate,
+                    *channel_count,
+                    *pre_skip,
+                    *output_gain,
+                )?,
             }
         } else {
             return None;
@@ -815,6 +851,54 @@ fn write_pcm(
         write_u32(out, sample_rate.checked_shl(16)?);
         write_pcmc(out, sample_size, little_endian)?;
         write_chnl_unknown_positions(out, channel_count)?;
+        Some(())
+    })
+}
+
+fn write_opus(
+    out: &mut Vec<u8>,
+    input_sample_rate: u32,
+    channel_count: u16,
+    pre_skip: u16,
+    output_gain: i16,
+) -> Option<()> {
+    if input_sample_rate == 0 || !matches!(channel_count, 1 | 2) {
+        return None;
+    }
+    write_box(out, *b"Opus", |out| {
+        write_zeroes(out, 6);
+        write_u16(out, 1);
+        write_zeroes(out, 8);
+        write_u16(out, channel_count);
+        write_u16(out, 16);
+        write_zeroes(out, 4);
+        write_u32(out, 48_000_u32.checked_shl(16)?);
+        write_dops(
+            out,
+            input_sample_rate,
+            u8::try_from(channel_count).ok()?,
+            pre_skip,
+            output_gain,
+        )?;
+        Some(())
+    })
+}
+
+fn write_dops(
+    out: &mut Vec<u8>,
+    input_sample_rate: u32,
+    channel_count: u8,
+    pre_skip: u16,
+    output_gain: i16,
+) -> Option<()> {
+    write_box(out, *b"dOps", |out| {
+        write_u8(out, 0);
+        write_u8(out, channel_count);
+        write_u16(out, pre_skip);
+        write_u32(out, input_sample_rate);
+        write_i16(out, output_gain);
+        // Channel mapping family zero is the standardized mono/stereo mapping.
+        write_u8(out, 0);
         Some(())
     })
 }

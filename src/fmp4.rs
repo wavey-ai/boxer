@@ -77,6 +77,59 @@ pub struct PcmAudioConfig {
     pub sample_kind: PcmSampleKind,
 }
 
+/// Codec configuration for raw Opus packets stored in ISO BMFF.
+///
+/// Opus media always uses a 48 kHz track timescale. `input_sample_rate` is the
+/// original encoder input rate recorded in `dOps`; it does not change the
+/// output timescale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpusAudioConfig {
+    pub input_sample_rate: u32,
+    /// Logical output channels advertised by the sample entry. This is
+    /// independent of each packet's internal mono/stereo coding: an Opus
+    /// decoder can produce either mono or stereo output from either form.
+    pub channel_count: u16,
+    pub pre_skip: u16,
+    pub output_gain: i16,
+}
+
+impl OpusAudioConfig {
+    fn is_valid(self) -> bool {
+        self.input_sample_rate > 0 && matches!(self.channel_count, 1 | 2)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioTrackConfig {
+    Pcm(PcmAudioConfig),
+    Opus(OpusAudioConfig),
+}
+
+pub const OPUS_OUTPUT_SAMPLE_RATE: u32 = 48_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpusPacketInfo {
+    pub duration_samples: u32,
+    pub encoded_channel_count: u8,
+}
+
+/// Parse and validate one raw Opus packet.
+///
+/// The returned duration is expressed in Opus' fixed 48 kHz output clock.
+/// Payload bytes are not decoded or changed.
+pub fn opus_packet_info(packet: &[u8]) -> Option<OpusPacketInfo> {
+    // RFC 6716 limits each frame, rather than a multi-frame packet as a
+    // whole, to 1,275 bytes. Reuse the codec's framing parser so CBR/VBR,
+    // padding, frame sizes, and the 120 ms duration ceiling are all checked.
+    libopus_rs::parse_packet(packet).ok()?;
+    let duration_samples = u32::try_from(libopus_rs::sample_count(packet, 48_000).ok()?).ok()?;
+    let encoded_channel_count = u8::try_from(libopus_rs::channels(packet).ok()?).ok()?;
+    Some(OpusPacketInfo {
+        duration_samples,
+        encoded_channel_count,
+    })
+}
+
 impl PcmAudioConfig {
     fn bytes_per_frame(self) -> Option<usize> {
         let valid_size = match self.sample_kind {
@@ -121,6 +174,26 @@ pub fn box_fmp4_with_init_and_pcm(
     next_dts: u64,
     include_init: bool,
     pcm_config: Option<PcmAudioConfig>,
+) -> Fmp4 {
+    box_fmp4_with_init_and_audio_config(
+        seq,
+        config,
+        avcs,
+        audio_units,
+        next_dts,
+        include_init,
+        pcm_config.map(AudioTrackConfig::Pcm),
+    )
+}
+
+pub fn box_fmp4_with_init_and_audio_config(
+    seq: u32,
+    config: Config,
+    avcs: Vec<AccessUnit>,
+    audio_units: Vec<AccessUnit>,
+    next_dts: u64,
+    include_init: bool,
+    audio_config: Option<AudioTrackConfig>,
 ) -> Fmp4 {
     let mut fmp4_data: Vec<u8> = Vec::new();
     let mut init_data: Vec<u8> = Vec::new();
@@ -199,59 +272,102 @@ pub fn box_fmp4_with_init_and_pcm(
     let mut audio_base_media_decode_time = None;
     let mut audio_init = None;
 
-    let (audio_type, offset) = if pcm_config.is_some() {
+    let (audio_type, offset) = if audio_config.is_some() {
         (AudioType::Unknown, 0)
     } else {
         detect_audio_with_offset(&audio_units)
     };
 
     let mut audio_ms: u32 = 0;
+    let mut opus_duration_samples = 0_u64;
 
-    if let Some(pcm) = pcm_config {
-        if let Some(bytes_per_frame) = pcm.bytes_per_frame() {
+    match audio_config {
+        Some(AudioTrackConfig::Pcm(pcm)) => {
+            if let Some(bytes_per_frame) = pcm.bytes_per_frame() {
+                for access_unit in &audio_units {
+                    if access_unit.data.is_empty()
+                        || !access_unit.data.len().is_multiple_of(bytes_per_frame)
+                    {
+                        continue;
+                    }
+                    let frame_count = access_unit.data.len() / bytes_per_frame;
+                    let duration_ms = u64::try_from(frame_count)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(1_000)
+                        .saturating_add(u64::from(pcm.sample_rate) / 2)
+                        / u64::from(pcm.sample_rate);
+                    if duration_ms == 0 {
+                        continue;
+                    }
+                    let Ok(sample_size) = u32::try_from(access_unit.data.len()) else {
+                        continue;
+                    };
+                    let duration_ms = u64_to_u32_saturating(duration_ms);
+                    audio_ms = audio_ms.saturating_add(duration_ms);
+                    audio_samples.push(FragmentSample {
+                        duration: Some(duration_ms),
+                        size: Some(sample_size),
+                        flags: None,
+                        composition_time_offset: None,
+                    });
+                    audio_data.extend_from_slice(&access_unit.data);
+                    audio_base_media_decode_time.get_or_insert(access_unit.pts);
+                }
+                if !audio_samples.is_empty() {
+                    audio_init = Some(AudioInit::Pcm {
+                        track_id: audio_track_id,
+                        channel_count: pcm.channel_count,
+                        sample_size: pcm.sample_size,
+                        sample_rate: pcm.sample_rate,
+                        little_endian: pcm.little_endian,
+                        floating_point: matches!(pcm.sample_kind, PcmSampleKind::Float),
+                    });
+                    has_audio_track = true;
+                }
+            }
+        }
+        Some(AudioTrackConfig::Opus(opus)) if opus.is_valid() => {
             for access_unit in &audio_units {
-                if access_unit.data.is_empty()
-                    || !access_unit.data.len().is_multiple_of(bytes_per_frame)
-                {
+                let Some(packet_info) = opus_packet_info(&access_unit.data) else {
                     continue;
-                }
-                let frame_count = access_unit.data.len() / bytes_per_frame;
-                let duration_ms = u64::try_from(frame_count)
-                    .unwrap_or(u64::MAX)
-                    .saturating_mul(1_000)
-                    .saturating_add(u64::from(pcm.sample_rate) / 2)
-                    / u64::from(pcm.sample_rate);
-                if duration_ms == 0 {
-                    continue;
-                }
+                };
                 let Ok(sample_size) = u32::try_from(access_unit.data.len()) else {
                     continue;
                 };
-                let duration_ms = u64_to_u32_saturating(duration_ms);
-                audio_ms = audio_ms.saturating_add(duration_ms);
                 audio_samples.push(FragmentSample {
-                    duration: Some(duration_ms),
+                    duration: Some(packet_info.duration_samples),
                     size: Some(sample_size),
                     flags: None,
                     composition_time_offset: None,
                 });
                 audio_data.extend_from_slice(&access_unit.data);
-                audio_base_media_decode_time.get_or_insert(access_unit.pts);
+                opus_duration_samples =
+                    opus_duration_samples.saturating_add(u64::from(packet_info.duration_samples));
+                audio_base_media_decode_time.get_or_insert_with(|| {
+                    access_unit
+                        .pts
+                        .saturating_mul(u64::from(OPUS_OUTPUT_SAMPLE_RATE) / 1_000)
+                });
             }
             if !audio_samples.is_empty() {
-                audio_init = Some(AudioInit::Pcm {
+                audio_init = Some(AudioInit::Opus {
                     track_id: audio_track_id,
-                    channel_count: pcm.channel_count,
-                    sample_size: pcm.sample_size,
-                    sample_rate: pcm.sample_rate,
-                    little_endian: pcm.little_endian,
-                    floating_point: matches!(pcm.sample_kind, PcmSampleKind::Float),
+                    input_sample_rate: opus.input_sample_rate,
+                    channel_count: opus.channel_count,
+                    pre_skip: opus.pre_skip,
+                    output_gain: opus.output_gain,
                 });
                 has_audio_track = true;
+                audio_ms = u64_to_u32_saturating(
+                    opus_duration_samples
+                        .saturating_mul(1_000)
+                        .saturating_add(u64::from(OPUS_OUTPUT_SAMPLE_RATE) / 2)
+                        / u64::from(OPUS_OUTPUT_SAMPLE_RATE),
+                );
             }
         }
-    } else {
-        match audio_type {
+        Some(AudioTrackConfig::Opus(_)) => {}
+        None => match audio_type {
             AudioType::Unknown => {}
             AudioType::FLAC => {
                 for a in &audio_units {
@@ -327,7 +443,7 @@ pub fn box_fmp4_with_init_and_pcm(
                 }
             }
             _ => {}
-        }
+        },
     }
 
     if matches!(audio_type, AudioType::FLAC) {
@@ -336,7 +452,7 @@ pub fn box_fmp4_with_init_and_pcm(
                 track_id: audio_track_id,
                 channel_count: frame_info.channels.into(),
                 sample_size: frame_info.bps.into(),
-                sample_rate: frame_info.sample_rate.into(),
+                sample_rate: frame_info.sample_rate,
                 streaminfo: create_streaminfo(&frame_info),
             });
         }
@@ -368,7 +484,14 @@ pub fn box_fmp4_with_init_and_pcm(
             height: config.height,
             avcc: avcc.clone(),
         });
-        let movie_timescale = if has_video_track { 90_000 } else { 1_000 };
+        let movie_timescale = if has_video_track {
+            90_000
+        } else {
+            audio_init
+                .as_ref()
+                .map(AudioInit::timescale)
+                .unwrap_or(1_000)
+        };
         let _ = mp4::write_init_segment(
             &mut init_data,
             movie_timescale,
@@ -398,6 +521,10 @@ pub fn box_fmp4_with_init_and_pcm(
 mod tests {
     use super::*;
     use access_unit::PSI_STREAM_H264;
+
+    fn read_u16(bytes: &[u8]) -> u16 {
+        u16::from_be_bytes([bytes[0], bytes[1]])
+    }
 
     fn read_u32(bytes: &[u8]) -> u32 {
         u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
@@ -429,6 +556,13 @@ mod tests {
         let size_offset = offset.checked_sub(4)?;
         let size = read_u32(data.get(size_offset..size_offset + 4)?) as usize;
         size.checked_sub(8)
+    }
+
+    fn box_payload<'a>(data: &'a [u8], box_type: &[u8; 4]) -> Option<&'a [u8]> {
+        let type_offset = box_type_offsets(data, box_type).into_iter().next()?;
+        let start = type_offset.checked_sub(4)?;
+        let size = read_u32(data.get(start..start + 4)?) as usize;
+        data.get(type_offset + 4..start.checked_add(size)?)
     }
 
     fn config() -> Config {
@@ -677,5 +811,189 @@ mod tests {
 
         assert!(!box_type_offsets(init, b"fpcm").is_empty());
         assert!(box_type_offsets(init, b"ipcm").is_empty());
+    }
+
+    #[test]
+    fn raw_opus_mono_and_stereo_use_dops_and_preserve_5ms_packets_exactly() {
+        for channel_count in [1_u16, 2] {
+            // CELT-only configuration 17 is 5 ms at the fixed 48 kHz Opus
+            // output rate. Code zero carries one frame in each packet. A
+            // stereo output may legally carry an adaptively mono-coded packet.
+            let mono_toc = 17 << 3;
+            let output_toc = mono_toc | (u8::from(channel_count == 2) << 2);
+            let first = vec![mono_toc, 0x11, 0x22];
+            let second = vec![output_toc, 0x33];
+            let units = [first.clone(), second.clone()]
+                .into_iter()
+                .enumerate()
+                .map(|(index, packet)| AccessUnit {
+                    key: true,
+                    pts: 10 + index as u64 * 5,
+                    dts: 10 + index as u64 * 5,
+                    data: Bytes::from(packet),
+                    stream_type: access_unit::PSI_STREAM_AUDIO_OPUS,
+                    id: index as u64,
+                })
+                .collect();
+
+            let fmp4 = box_fmp4_with_init_and_audio_config(
+                9,
+                Config {
+                    width: 0,
+                    height: 0,
+                    avcc: None,
+                },
+                Vec::new(),
+                units,
+                0,
+                true,
+                Some(AudioTrackConfig::Opus(OpusAudioConfig {
+                    input_sample_rate: 48_000,
+                    channel_count,
+                    pre_skip: 0,
+                    output_gain: 0,
+                })),
+            );
+            let init = fmp4.init.as_ref().expect("Opus init segment");
+            let opus = box_type_offsets(init, b"Opus")[0];
+            let dops = box_payload(init, b"dOps").expect("dOps payload");
+            let mdhd = box_type_offsets(init, b"mdhd")[0];
+            let trun = box_type_offsets(&fmp4.data, b"trun")[0];
+            let tfdt = box_type_offsets(&fmp4.data, b"tfdt")[0];
+            let mut expected_payload = first;
+            expected_payload.extend_from_slice(&second);
+
+            assert_eq!(fmp4.duration, 10);
+            assert_eq!(
+                box_payload(&fmp4.data, b"mdat"),
+                Some(expected_payload.as_slice())
+            );
+            assert_eq!(read_u16(&init[opus + 20..opus + 22]), channel_count);
+            assert_eq!(read_u32(&init[opus + 28..opus + 32]), 48_000 << 16);
+            assert_eq!(read_u32(&init[mdhd + 16..mdhd + 20]), 48_000);
+            assert_eq!(
+                dops,
+                &[0, channel_count as u8, 0, 0, 0, 0, 0xbb, 0x80, 0, 0, 0]
+            );
+            assert_eq!(read_u32(&fmp4.data[tfdt + 8..tfdt + 12]), 480);
+            assert_eq!(read_u32(&fmp4.data[trun + 8..trun + 12]), 2);
+            assert_eq!(read_u32(&fmp4.data[trun + 16..trun + 20]), 240);
+            assert_eq!(
+                read_u32(&fmp4.data[trun + 20..trun + 24]),
+                expected_payload.len() as u32 - second.len() as u32
+            );
+            assert_eq!(read_u32(&fmp4.data[trun + 24..trun + 28]), 240);
+            assert_eq!(
+                read_u32(&fmp4.data[trun + 28..trun + 32]),
+                second.len() as u32
+            );
+        }
+    }
+
+    #[test]
+    fn opus_packet_info_accepts_tiny_valid_packets_and_rejects_invalid_durations() {
+        assert_eq!(
+            opus_packet_info(&[17 << 3]),
+            Some(OpusPacketInfo {
+                duration_samples: 240,
+                encoded_channel_count: 1,
+            })
+        );
+        assert_eq!(
+            opus_packet_info(&[(17 << 3) | (1 << 2)]),
+            Some(OpusPacketInfo {
+                duration_samples: 240,
+                encoded_channel_count: 2,
+            })
+        );
+        assert_eq!(opus_packet_info(&[]), None);
+        assert_eq!(opus_packet_info(&[(3 << 3) | 3, 3]), None);
+        // A code-zero packet has one frame after the TOC. A 1,275-byte frame
+        // is valid; 1,276 bytes is not.
+        assert!(opus_packet_info(&vec![0; 1_276]).is_some());
+        assert_eq!(opus_packet_info(&vec![0; 1_277]), None);
+    }
+
+    #[test]
+    fn opus_multiframe_packet_larger_than_1275_bytes_is_valid_and_preserved() {
+        // Code one: two equal-sized CBR frames. Each 1,000-byte frame is under
+        // RFC 6716's per-frame ceiling even though the packet is 2,001 bytes.
+        let mut packet = vec![(17 << 3) | 1];
+        packet.extend((0..2_000).map(|index| index as u8));
+        assert_eq!(packet.len(), 2_001);
+        assert_eq!(
+            opus_packet_info(&packet),
+            Some(OpusPacketInfo {
+                duration_samples: 480,
+                encoded_channel_count: 1,
+            })
+        );
+
+        let fmp4 = box_fmp4_with_init_and_audio_config(
+            1,
+            Config {
+                width: 0,
+                height: 0,
+                avcc: None,
+            },
+            Vec::new(),
+            vec![AccessUnit {
+                key: true,
+                pts: 0,
+                dts: 0,
+                data: Bytes::from(packet.clone()),
+                stream_type: access_unit::PSI_STREAM_AUDIO_OPUS,
+                id: 0,
+            }],
+            0,
+            true,
+            Some(AudioTrackConfig::Opus(OpusAudioConfig {
+                input_sample_rate: 48_000,
+                channel_count: 1,
+                pre_skip: 0,
+                output_gain: 0,
+            })),
+        );
+
+        assert_eq!(fmp4.duration, 10);
+        assert_eq!(box_payload(&fmp4.data, b"mdat"), Some(packet.as_slice()));
+        let trun = box_type_offsets(&fmp4.data, b"trun")[0];
+        assert_eq!(read_u32(&fmp4.data[trun + 16..trun + 20]), 480);
+    }
+
+    #[test]
+    fn mono_opus_track_accepts_stereo_coded_packet_for_decoder_downmix() {
+        let packet = [(17 << 3) | (1 << 2)];
+        let fmp4 = box_fmp4_with_init_and_audio_config(
+            1,
+            Config {
+                width: 0,
+                height: 0,
+                avcc: None,
+            },
+            Vec::new(),
+            vec![AccessUnit {
+                key: true,
+                pts: 0,
+                dts: 0,
+                data: Bytes::copy_from_slice(&packet),
+                stream_type: access_unit::PSI_STREAM_AUDIO_OPUS,
+                id: 0,
+            }],
+            0,
+            true,
+            Some(AudioTrackConfig::Opus(OpusAudioConfig {
+                input_sample_rate: 48_000,
+                channel_count: 1,
+                pre_skip: 0,
+                output_gain: 0,
+            })),
+        );
+
+        let init = fmp4.init.expect("mono Opus init");
+        let opus = box_type_offsets(&init, b"Opus")[0];
+        assert_eq!(read_u16(&init[opus + 20..opus + 22]), 1);
+        assert_eq!(box_payload(&fmp4.data, b"mdat"), Some(packet.as_slice()));
+        assert_eq!(fmp4.duration, 5);
     }
 }
