@@ -1,9 +1,8 @@
 [package]
 name = "boxer"
-version = "0.1.2"
+version = "0.1.0"
 edition = "2021"
 description = "Fragmented MP4 and RTMP media boxing utilities for Wavey"
-license = "MIT"
 repository = "https://github.com/wavey-ai/boxer"
 
 [dependencies]
