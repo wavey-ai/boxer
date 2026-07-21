@@ -1,11 +1,12 @@
 [package]
-name = "boxer"
+name = "wavey-boxer"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Fragmented MP4 and RTMP media boxing utilities for Wavey"
 repository = "https://github.com/wavey-ai/boxer"
 
 [dependencies]
-access-unit = { version = "0.1.2", git = "https://github.com/wavey-ai/access-unit.git" }
+access-unit = "0.1.3"
 bytes = "1.6.0"
 libopus-rs = "0.0.2"

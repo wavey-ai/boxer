@@ -375,7 +375,8 @@ impl AudioInit {
     pub(crate) fn timescale(&self) -> u32 {
         match self {
             AudioInit::Opus { .. } => 48_000,
-            AudioInit::Aac { .. } | AudioInit::Flac { .. } | AudioInit::Pcm { .. } => 1_000,
+            AudioInit::Aac { frequency, .. } => frequency.as_u32(),
+            AudioInit::Flac { .. } | AudioInit::Pcm { .. } => 1_000,
         }
     }
 }

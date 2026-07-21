@@ -101,6 +101,8 @@ impl OpusAudioConfig {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioTrackConfig {
+    /// AAC access-unit timestamps use the AAC sample-rate clock.
+    Aac,
     Pcm(PcmAudioConfig),
     Opus(OpusAudioConfig),
 }
@@ -279,9 +281,51 @@ pub fn box_fmp4_with_init_and_audio_config(
     };
 
     let mut audio_ms: u32 = 0;
+    let mut aac_duration_samples = 0_u64;
+    let mut aac_sample_rate = 0_u32;
     let mut opus_duration_samples = 0_u64;
 
     match audio_config {
+        Some(AudioTrackConfig::Aac) => {
+            let mut sampling_frequency = SamplingFrequency::Hz48000;
+            let mut channel_configuration = ChannelConfiguration::TwoChannels;
+            let mut profile = AacProfile::Main;
+
+            for access_unit in &audio_units {
+                let Some(header) = AdtsHeader::read_from(&access_unit.data) else {
+                    continue;
+                };
+                let Some(frame) = extract_aac_data(&access_unit.data) else {
+                    continue;
+                };
+                let Ok(sample_size) = u32::try_from(frame.len()) else {
+                    continue;
+                };
+                sampling_frequency = header.sampling_frequency;
+                channel_configuration = header.channel_configuration;
+                profile = header.profile;
+                aac_sample_rate = sampling_frequency.as_u32();
+                aac_duration_samples = aac_duration_samples.saturating_add(1_024);
+                audio_samples.push(FragmentSample {
+                    duration: Some(1_024),
+                    size: Some(sample_size),
+                    flags: None,
+                    composition_time_offset: None,
+                });
+                audio_data.extend_from_slice(&frame);
+                audio_base_media_decode_time.get_or_insert(access_unit.pts);
+            }
+
+            if !audio_samples.is_empty() {
+                audio_init = Some(AudioInit::Aac {
+                    track_id: audio_track_id,
+                    profile,
+                    frequency: sampling_frequency,
+                    channel_configuration,
+                });
+                has_audio_track = true;
+            }
+        }
         Some(AudioTrackConfig::Pcm(pcm)) => {
             if let Some(bytes_per_frame) = pcm.bytes_per_frame() {
                 for access_unit in &audio_units {
@@ -418,17 +462,21 @@ pub fn box_fmp4_with_init_and_audio_config(
                         sampling_frequency = header.sampling_frequency;
                         channel_configuration = header.channel_configuration;
                         profile = header.profile;
-                        let frame_duration: u32 =
-                            (1024.0 / sampling_frequency.as_u32() as f32 * 1000.0).round() as u32;
-                        audio_ms += frame_duration;
+                        aac_sample_rate = sampling_frequency.as_u32();
+                        aac_duration_samples = aac_duration_samples.saturating_add(1_024);
                         audio_samples.push(FragmentSample {
-                            duration: Some(frame_duration),
+                            duration: Some(1_024),
                             size: Some(sample_size),
                             flags: None,
                             composition_time_offset: None,
                         });
                         audio_data.extend_from_slice(&frame);
-                        audio_base_media_decode_time.get_or_insert(a.pts);
+                        audio_base_media_decode_time.get_or_insert_with(|| {
+                            a.pts
+                                .saturating_mul(u64::from(aac_sample_rate))
+                                .saturating_add(500)
+                                / 1_000
+                        });
                     }
                 }
 
@@ -444,6 +492,15 @@ pub fn box_fmp4_with_init_and_audio_config(
             }
             _ => {}
         },
+    }
+
+    if aac_sample_rate > 0 {
+        audio_ms = u64_to_u32_saturating(
+            aac_duration_samples
+                .saturating_mul(1_000)
+                .saturating_add(u64::from(aac_sample_rate) / 2)
+                / u64::from(aac_sample_rate),
+        );
     }
 
     if matches!(audio_type, AudioType::FLAC) {
@@ -607,13 +664,17 @@ mod tests {
     }
 
     fn aac_unit() -> AccessUnit {
+        aac_unit_at(0)
+    }
+
+    fn aac_unit_at(pts: u64) -> AccessUnit {
         let payload = [0x11, 0x22, 0x33, 0x44];
         let mut data = access_unit::aac::create_adts_header(0x66, 2, 48_000, payload.len(), false);
         data.extend_from_slice(&payload);
         AccessUnit {
             key: true,
-            pts: 0,
-            dts: 0,
+            pts,
+            dts: pts,
             data: Bytes::from(data),
             stream_type: 0,
             id: 1,
@@ -686,6 +747,51 @@ mod tests {
         assert_eq!(box_payload_len(&fmp4.data, b"mdat"), Some(payload_len));
         assert!(!box_type_offsets(init, b"mp4a").is_empty());
         assert!(!box_type_offsets(init, b"esds").is_empty());
+    }
+
+    #[test]
+    fn explicit_aac_audio_uses_native_sample_clock() {
+        let first = aac_unit_at(48_000);
+        let second = aac_unit_at(49_024);
+        let first_payload_len = access_unit::aac::extract_aac_data(&first.data)
+            .expect("first aac payload")
+            .len();
+        let second_payload_len = access_unit::aac::extract_aac_data(&second.data)
+            .expect("second aac payload")
+            .len();
+
+        let fmp4 = box_fmp4_with_init_and_audio_config(
+            10,
+            Config {
+                width: 0,
+                height: 0,
+                avcc: None,
+            },
+            Vec::new(),
+            vec![first, second],
+            0,
+            true,
+            Some(AudioTrackConfig::Aac),
+        );
+        let init = fmp4.init.as_ref().expect("AAC init segment");
+        let mdhd = box_type_offsets(init, b"mdhd")[0];
+        let tfdt = box_type_offsets(&fmp4.data, b"tfdt")[0];
+        let trun = box_type_offsets(&fmp4.data, b"trun")[0];
+
+        assert_eq!(fmp4.duration, 43);
+        assert_eq!(read_u32(&init[mdhd + 16..mdhd + 20]), 48_000);
+        assert_eq!(read_u32(&fmp4.data[tfdt + 8..tfdt + 12]), 48_000);
+        assert_eq!(read_u32(&fmp4.data[trun + 8..trun + 12]), 2);
+        assert_eq!(read_u32(&fmp4.data[trun + 16..trun + 20]), 1_024);
+        assert_eq!(
+            read_u32(&fmp4.data[trun + 20..trun + 24]),
+            first_payload_len as u32
+        );
+        assert_eq!(read_u32(&fmp4.data[trun + 24..trun + 28]), 1_024);
+        assert_eq!(
+            read_u32(&fmp4.data[trun + 28..trun + 32]),
+            second_payload_len as u32
+        );
     }
 
     #[test]
